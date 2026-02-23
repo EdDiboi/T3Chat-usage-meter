@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "T3Chat Usage Meter",
+  "description": "Shows session usage as a compact meter under the model selector in t3.chat.",
+  "version": "0.1.0",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://t3.chat/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
