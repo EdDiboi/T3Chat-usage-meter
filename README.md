@@ -9,6 +9,7 @@ Unofficial Chrome extension that adds a compact session usage meter to t3.chat.
 - Refresh after message send
 - Hover tooltip for reset timing (when available)
 
+<img width="772" height="135" alt="Usage Bar" src="https://github.com/user-attachments/assets/85be74cf-2042-4bf4-b25b-4b943ee241d4" />
 
 ## Install (Chrome)
 
