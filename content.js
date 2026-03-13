@@ -7,7 +7,9 @@
   const PARENT_ROW_CLASS = "t3-session-usage-parent-row";
   const REFRESH_INTERVAL_MS = 90_000;
   const POST_SEND_REFRESH_DELAYS_MS = [1400, 4200, 8500];
+  const INITIAL_REFRESH_DELAYS_MS = [250, 1000, 2500, 5000];
   const DEFAULT_PRIMARY_FALLBACK = "rgb(162, 59, 103)";
+  const DEFAULT_MARKER_COLOR = "#de2929";
   const CUSTOMER_DATA_TRPC_PATH =
     "/api/trpc/getCustomerData?batch=1&input=%7B%220%22%3A%7B%22json%22%3A%7B%22sessionId%22%3Anull%7D%2C%22meta%22%3A%7B%22values%22%3A%7B%22sessionId%22%3A%5B%22undefined%22%5D%7D%7D%7D%7D";
   const SUBSCRIPTION_DATA_TRPC_PATH =
@@ -24,7 +26,9 @@
   let observer = null;
   let ensureQueued = false;
   let postSendTimers = [];
+  let initialRefreshTimers = [];
   let lastKnownPercent = null;
+  let lastKnownMonthlyPercent = null;
   let lastKnownResetText = null;
   let resetTooltipEl = null;
 
@@ -32,6 +36,25 @@
     if (!Number.isFinite(value)) return null;
     if (value < 0 || value > 100) return null;
     return Math.round(value);
+  }
+
+  function normalizeMetricNumber(value) {
+    if (typeof value !== "number") return null;
+    if (!Number.isFinite(value)) return null;
+    if (value < 0) return null;
+    return value;
+  }
+
+  function roundMetricPercent(value) {
+    const normalized = normalizeMetricNumber(value);
+    if (normalized === null) return null;
+    return clampPercent(Math.min(100, normalized));
+  }
+
+  function toRemainingPercent(usedPercent) {
+    const normalized = normalizeMetricNumber(usedPercent);
+    if (normalized === null) return null;
+    return clampPercent(100 - Math.min(100, normalized));
   }
 
   function injectStyles() {
@@ -46,12 +69,13 @@
         align-items: center;
         align-self: center;
         gap: 4px;
-        width: 236px;
+        width: 224px;
         max-width: min(72vw, 280px);
         margin-top: 0;
         margin-bottom: 0;
         pointer-events: auto;
         --t3-primary: var(--primary, ${DEFAULT_PRIMARY_FALLBACK});
+        --t3-marker-color: ${DEFAULT_MARKER_COLOR};
         --t3-usage-font-family: inherit;
         --t3-usage-font-size: 12px;
         --t3-usage-line-height: 1;
@@ -89,15 +113,20 @@
         white-space: nowrap;
       }
 
-      #${METER_ID} .t3-usage-track {
+      #${METER_ID} .t3-usage-progress {
         position: relative;
         flex: 1 1 140px;
         min-width: 130px;
+      }
+
+      #${METER_ID} .t3-usage-track {
+        position: relative;
         height: 6px;
         border-radius: 999px;
         background: rgba(162, 59, 103, 0.2);
         background: color-mix(in oklab, var(--t3-primary) 20%, transparent);
         overflow: hidden;
+        width: 100%;
       }
 
       #${METER_ID} .t3-usage-fill {
@@ -106,6 +135,31 @@
         background: var(--t3-primary);
         border-radius: 999px;
         transition: width 220ms ease;
+      }
+
+      #${METER_ID} .t3-usage-marker {
+        position: absolute;
+        bottom: 0;
+        left: 0%;
+        width: 3px;
+        height: 6px;
+        display: none;
+        background: var(--t3-marker-color);
+        z-index: 2;
+        cursor: help;
+        transform: translateX(-50%);
+        pointer-events: auto;
+      }
+
+      #${METER_ID} .t3-usage-marker::before {
+        content: "";
+        position: absolute;
+        top: -8px;
+        left: 50%;
+        transform: translateX(-50%);
+        border-left: 5.5px solid transparent;
+        border-right: 5.5px solid transparent;
+        border-top: 8px solid var(--t3-marker-color);
       }
 
       #${RESET_TOOLTIP_ID} {
@@ -156,6 +210,9 @@
 
     textRow.append(title, value);
 
+    const progress = document.createElement("div");
+    progress.className = "t3-usage-progress";
+
     const track = document.createElement("div");
     track.className = "t3-usage-track";
 
@@ -163,8 +220,15 @@
     fill.className = "t3-usage-fill";
     track.appendChild(fill);
 
-    meter.append(textRow, track);
-    applyPercentToMeter(meter, lastKnownPercent);
+    const marker = document.createElement("div");
+    marker.className = "t3-usage-marker";
+    marker.addEventListener("mouseenter", () => showOverageTooltip(marker));
+    marker.addEventListener("mouseleave", hideResetTooltip);
+    marker.addEventListener("mousemove", () => showOverageTooltip(marker));
+
+    progress.append(track, marker);
+    meter.append(textRow, progress);
+    applyUsageSnapshotToMeter(meter, lastKnownPercent, lastKnownMonthlyPercent);
     return meter;
   }
 
@@ -184,9 +248,8 @@
     resetTooltipEl.dataset.show = "false";
   }
 
-  function showResetTooltip(anchorEl) {
+  function showTooltip(anchorEl, tooltipText) {
     if (!(anchorEl instanceof HTMLElement)) return;
-    const tooltipText = lastKnownResetText || "Reset info loading...";
     const tooltip = ensureResetTooltipElement();
     tooltip.textContent = tooltipText;
 
@@ -196,6 +259,22 @@
     tooltip.style.left = `${x}px`;
     tooltip.style.top = `${y}px`;
     tooltip.dataset.show = "true";
+  }
+
+  function showResetTooltip(anchorEl) {
+    showTooltip(anchorEl, lastKnownResetText || "Reset info loading...");
+  }
+
+  function buildOverageTooltip(monthlyPercent) {
+    const safeMonthlyPercent = roundMetricPercent(monthlyPercent);
+    if (safeMonthlyPercent === null) return "Overage unavailable";
+    const remainingPercent = clampPercent(100 - safeMonthlyPercent);
+    if (remainingPercent === null) return "Overage unavailable";
+    return `Overage left: ${remainingPercent}%`;
+  }
+
+  function showOverageTooltip(anchorEl) {
+    showTooltip(anchorEl, buildOverageTooltip(lastKnownMonthlyPercent));
   }
 
   function findAttachAnchor() {
@@ -257,13 +336,13 @@
     }
     syncTypographyFromAttach(meter, anchor);
     applyResetTooltip(meter);
-
     return meter;
   }
 
   function applyResetTooltip(meter) {
     const titleEl = meter.querySelector(".t3-usage-title");
     const textRowEl = meter.querySelector(".t3-usage-text-row");
+    const markerEl = meter.querySelector(".t3-usage-marker");
 
     const tooltip = lastKnownResetText || "Reset info loading...";
 
@@ -274,42 +353,52 @@
     if (textRowEl instanceof HTMLElement) {
       textRowEl.title = tooltip;
     }
-  }
 
-  function buildMeterTitle(percent) {
-    const usagePart = percent === null ? "Session usage unavailable" : `Session usage: ${percent}%`;
-    if (lastKnownResetText) {
-      return `${usagePart}\n${lastKnownResetText}`;
+    if (markerEl instanceof HTMLElement) {
+      markerEl.title = buildOverageTooltip(lastKnownMonthlyPercent);
     }
-    return usagePart;
   }
 
-  function applyPercentToMeter(meter, percent) {
+  function buildMeterTitle(percent, monthlyPercent) {
+    const usagePart = percent === null ? "Session usage unavailable" : `Session usage: ${percent}%`;
+    const monthlyPart = monthlyPercent === null ? null : buildOverageTooltip(monthlyPercent);
+    if (lastKnownResetText) {
+      return [usagePart, monthlyPart, lastKnownResetText].filter(Boolean).join("\n");
+    }
+    return [usagePart, monthlyPart].filter(Boolean).join("\n");
+  }
+
+  function applyUsageSnapshotToMeter(meter, percent, monthlyPercent) {
     const value = meter.querySelector(".t3-usage-value");
     const fill = meter.querySelector(".t3-usage-fill");
-    if (!value || !fill) return false;
+    const marker = meter.querySelector(".t3-usage-marker");
+    if (!value || !fill || !marker) return false;
 
     const safePercent = clampPercent(percent);
+    const safeMonthlyPercent = roundMetricPercent(monthlyPercent);
+    marker.style.display = safeMonthlyPercent === null ? "none" : "block";
+    marker.style.left = safeMonthlyPercent === null ? "0%" : `${safeMonthlyPercent}%`;
+
     if (safePercent === null) {
       value.textContent = "--%";
       fill.style.width = "0%";
-      meter.title = buildMeterTitle(null);
+      meter.title = buildMeterTitle(null, safeMonthlyPercent);
       return false;
     }
 
     value.textContent = `${safePercent}%`;
     fill.style.width = `${safePercent}%`;
-    meter.title = buildMeterTitle(safePercent);
+    meter.title = buildMeterTitle(safePercent, safeMonthlyPercent);
     return true;
   }
 
-  function updateMeter(percent) {
+  function updateMeter(percent, monthlyPercent) {
     const meter = ensureMeter();
     if (!meter) return;
 
-    if (applyPercentToMeter(meter, percent)) {
-      lastKnownPercent = clampPercent(percent);
-    }
+    applyUsageSnapshotToMeter(meter, percent, monthlyPercent);
+    lastKnownPercent = clampPercent(percent);
+    lastKnownMonthlyPercent = roundMetricPercent(monthlyPercent);
   }
 
   function extractPercentLiteral(text) {
@@ -366,6 +455,34 @@
       }
     }
     return payloads;
+  }
+
+  function findNamedMetricInValue(rootValue, targetKey) {
+    const normalizedTarget = String(targetKey).toLowerCase();
+    const stack = [rootValue];
+
+    while (stack.length > 0) {
+      const value = stack.pop();
+      if (value === null || value === undefined) continue;
+
+      if (Array.isArray(value)) {
+        for (let i = value.length - 1; i >= 0; i -= 1) {
+          stack.push(value[i]);
+        }
+        continue;
+      }
+
+      if (typeof value !== "object") continue;
+
+      for (const [key, childValue] of Object.entries(value)) {
+        if (String(key).toLowerCase() === normalizedTarget) {
+          return childValue;
+        }
+        stack.push(childValue);
+      }
+    }
+
+    return null;
   }
 
   function pickBetterPercent(current, nextPercent, nextScore) {
@@ -523,7 +640,7 @@
       }
 
       if (typeof value === "number") {
-        if (/usagewindownextresetat|nextresetat|resetat/.test(pathText)) {
+        if (/usagefourhournextresetat|usagewindownextresetat|nextresetat|resetat/.test(pathText)) {
           const fromTimestamp = formatResetTimestamp(value);
           best = pickBetterReset(best, fromTimestamp, 28);
         }
@@ -587,11 +704,41 @@
     return extractPercentFromRawText(rawText);
   }
 
+  function extractUsageSnapshotFromTrpcResponse(rawText) {
+    const payloads = parseTrpcPayloads(rawText);
+
+    for (const payload of payloads) {
+      const fourHourUsed = normalizeMetricNumber(findNamedMetricInValue(payload, "usageFourHourPercentage"));
+      const monthUsed = normalizeMetricNumber(findNamedMetricInValue(payload, "usageMonthPercentage"));
+      const periodUsed = normalizeMetricNumber(findNamedMetricInValue(payload, "usagePeriodPercentage"));
+      const sessionPercent = toRemainingPercent(fourHourUsed ?? periodUsed);
+      const monthlyPercent = roundMetricPercent(monthUsed);
+
+      if (sessionPercent !== null || monthlyPercent !== null) {
+        return {
+          sessionPercent,
+          monthlyPercent
+        };
+      }
+    }
+
+    const fallbackPercent = extractPercentFromTrpcResponse(rawText);
+    return {
+      sessionPercent: fallbackPercent,
+      monthlyPercent: null
+    };
+  }
+
   function extractResetFromTrpcResponse(rawText) {
     const payloads = parseTrpcPayloads(rawText);
     let best = null;
 
     for (const payload of payloads) {
+      const fourHourReset = formatResetTimestamp(findNamedMetricInValue(payload, "usageFourHourNextResetAt"));
+      if (fourHourReset) {
+        best = pickBetterReset(best, fourHourReset, 80);
+      }
+
       const candidate = findResetCandidateInValue(payload);
       if (!candidate) continue;
       best = pickBetterReset(best, candidate.text, candidate.score);
@@ -621,13 +768,15 @@
     return response.text();
   }
 
-  async function fetchSessionUsageFromApi() {
+  async function fetchUsageSnapshotFromApi() {
     const customerDataText = await fetchTrpcText(CUSTOMER_DATA_TRPC_PATH);
-    const customerPercent = extractPercentFromTrpcResponse(customerDataText);
-    if (customerPercent !== null) return customerPercent;
+    const customerSnapshot = extractUsageSnapshotFromTrpcResponse(customerDataText);
+    if (customerSnapshot.sessionPercent !== null || customerSnapshot.monthlyPercent !== null) {
+      return customerSnapshot;
+    }
 
     const subscriptionDataText = await fetchTrpcText(SUBSCRIPTION_DATA_TRPC_PATH);
-    return extractPercentFromTrpcResponse(subscriptionDataText);
+    return extractUsageSnapshotFromTrpcResponse(subscriptionDataText);
   }
 
   async function fetchResetInfoFromApi() {
@@ -639,11 +788,14 @@
     return extractResetFromTrpcResponse(customerDataText);
   }
 
-  async function fetchSessionUsage() {
+  async function fetchUsageSnapshot() {
     try {
-      return await fetchSessionUsageFromApi();
+      return await fetchUsageSnapshotFromApi();
     } catch {
-      return null;
+      return {
+        sessionPercent: null,
+        monthlyPercent: null
+      };
     }
   }
 
@@ -669,7 +821,7 @@
       const meter = ensureMeter();
       if (meter) {
         applyResetTooltip(meter);
-        applyPercentToMeter(meter, lastKnownPercent);
+        applyUsageSnapshotToMeter(meter, lastKnownPercent, lastKnownMonthlyPercent);
       }
     }
   }
@@ -680,24 +832,24 @@
     refreshResetInfo();
 
     try {
-      const percent = await fetchSessionUsage();
-      if (percent === null) {
-        if (lastKnownPercent === null) {
-          updateMeter(null);
+      const snapshot = await fetchUsageSnapshot();
+      if (snapshot.sessionPercent === null && snapshot.monthlyPercent === null) {
+        if (lastKnownPercent === null && lastKnownMonthlyPercent === null) {
+          updateMeter(null, null);
         }
       } else {
-        updateMeter(percent);
+        updateMeter(snapshot.sessionPercent, snapshot.monthlyPercent);
       }
-    } catch (error) {
-      if (lastKnownPercent === null) {
-        updateMeter(null);
+    } catch {
+      if (lastKnownPercent === null && lastKnownMonthlyPercent === null) {
+        updateMeter(null, null);
       }
     } finally {
       isFetching = false;
       const meter = ensureMeter();
       if (meter) {
         applyResetTooltip(meter);
-        applyPercentToMeter(meter, lastKnownPercent);
+        applyUsageSnapshotToMeter(meter, lastKnownPercent, lastKnownMonthlyPercent);
       }
     }
   }
@@ -753,6 +905,26 @@
     }
   }
 
+  function clearInitialRefreshTimers() {
+    for (const timerId of initialRefreshTimers) {
+      window.clearTimeout(timerId);
+    }
+    initialRefreshTimers = [];
+  }
+
+  function scheduleInitialRefreshes() {
+    clearInitialRefreshTimers();
+    refreshUsage();
+    refreshResetInfo();
+    for (const delayMs of INITIAL_REFRESH_DELAYS_MS) {
+      const timerId = window.setTimeout(() => {
+        refreshUsage();
+        refreshResetInfo();
+      }, delayMs);
+      initialRefreshTimers.push(timerId);
+    }
+  }
+
   function handleFormSubmit(event) {
     const target = event.target;
     if (!(target instanceof HTMLFormElement)) return;
@@ -775,8 +947,7 @@
     ensureMeter();
     startObserver();
     startRefreshTimer();
-    refreshUsage();
-    refreshResetInfo();
+    scheduleInitialRefreshes();
 
     document.addEventListener("submit", handleFormSubmit, true);
     document.addEventListener("click", handleSendClick, true);
@@ -785,7 +956,7 @@
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) {
         ensureMeter();
-        refreshUsage();
+        scheduleInitialRefreshes();
       } else {
         hideResetTooltip();
       }

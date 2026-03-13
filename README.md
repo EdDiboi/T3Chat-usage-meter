@@ -1,14 +1,14 @@
 # T3Chat Usage Meter
 
-Unofficial Chrome extension that adds a compact session usage meter to t3.chat.
+Unofficial Chrome extension that adds compact usage indicators to t3.chat.
 
 ## Features
 
-- `Session: X%` label plus slim progress bar
-- Refresh on page load
-- Refresh after message send
-- Hover tooltip for reset timing (when available)
-
+- `Session: X%` label with a slim inline bar
+- Red overage marker with a hover tooltip
+- Reset tooltip on the session label
+- Refresh on page open and after each send
+- Reads usage from t3.chat API responses
 
 ## Install (Chrome)
 
