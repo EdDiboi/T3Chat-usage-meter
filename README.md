@@ -12,8 +12,6 @@ Unofficial Chrome extension that adds compact usage indicators to t3.chat.
 
 <img src="./assets/usage-meter.png" alt="T3Chat Usage Meter screenshot" width="1100" />
 
-
-
 ## Install (Chrome)
 
 1. Open `chrome://extensions`
