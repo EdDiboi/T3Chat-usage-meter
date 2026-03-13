@@ -10,6 +10,8 @@ Unofficial Chrome extension that adds compact usage indicators to t3.chat.
 - Refresh shortly after page open and after each send
 - Reads usage from t3.chat API responses
 
+<img src="./assets/usage-meter.png" alt="T3Chat Usage Meter screenshot" width="1100" />
+
 
 
 ## Install (Chrome)
